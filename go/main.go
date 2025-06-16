@@ -741,12 +741,16 @@ func createStyles(zipWriter *zip.Writer) error {
 
 	content := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-    <w:docDefaults>
-        <w:rPrDefault>
-            <w:rPr>
-                <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>
-                <w:sz w:val="22"/>
-            </w:rPr>
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts
+          w:ascii="Times New Roman"
+          w:hAnsi="Times New Roman"
+          w:cs="Times New Roman"
+          w:eastAsia="TH SarabunPSK"/>
+        <w:sz w:val="22"/>
+      </w:rPr>
         </w:rPrDefault>
         <w:pPrDefault>
             <w:pPr>
