@@ -536,71 +536,127 @@ func convertHTMLToParagraphs(htmlContent string) []interface{} {
 	// ขั้นตอนที่ 1: html.UnescapeString() เพื่อแปลง HTML entities
 	content := html.UnescapeString(htmlContent)
 
-	// ขั้นตอนที่ 2: จัดการ <figure> tags ก่อน
-	content = processFigureTags(content, &paragraphs)
-
-	// ขั้นตอนที่ 3: ลบ HTML comments และ special elements
+	// ขั้นตอนที่ 2: ลบ HTML comments และ special elements (ยกเว้น figure)
 	content = cleanupHTML(content)
 
-	// ขั้นตอนที่ 4: แยก paragraphs โดยใช้ <p> tags
-	pRegex := regexp.MustCompile(`<p([^>]*)>(.*?)</p>`)
-	pMatches := pRegex.FindAllStringSubmatch(content, -1)
+	// ขั้นตอนที่ 3: แยก content เป็น segments โดยคำนึงถึงตำแหน่งของ figure
+	segments := parseContentWithFigures(content)
 
-	for _, match := range pMatches {
-		attributes := match[1]
-		content := strings.TrimSpace(match[2])
+	// ขั้นตอนที่ 4: แปลงแต่ละ segment
+	for _, segment := range segments {
+		if segment.Type == "figure" {
+			// สร้าง image paragraph
+			imageParagraph := createImageParagraph(segment.ImageInfo)
+			paragraphs = append(paragraphs, imageParagraph)
+		} else if segment.Type == "text" {
+			// แยก paragraphs โดยใช้ <p> tags
+			pRegex := regexp.MustCompile(`<p([^>]*)>(.*?)</p>`)
+			pMatches := pRegex.FindAllStringSubmatch(segment.Content, -1)
 
-		// จัดการ paragraph ว่างหรือมีแค่ &nbsp;
-		if content == "" || isEmptyOrOnlyNbsp(content) {
-			// สร้าง empty paragraph แต่รักษา attributes (เช่น class="indent-a")
-			para := createEmptyParagraphWithAttributes(attributes)
-			paragraphs = append(paragraphs, para)
-			continue
+			for _, match := range pMatches {
+				attributes := match[1]
+				content := strings.TrimSpace(match[2])
+
+				// จัดการ paragraph ว่างหรือมีแค่ &nbsp;
+				if content == "" || isEmptyOrOnlyNbsp(content) {
+					// สร้าง empty paragraph แต่รักษา attributes (เช่น class="indent-a")
+					para := createEmptyParagraphWithAttributes(attributes)
+					paragraphs = append(paragraphs, para)
+					continue
+				}
+
+				// สร้าง paragraph ปกติ
+				para := createParagraphFromHTML(content, attributes)
+				paragraphs = append(paragraphs, para)
+			}
+
+			// ถ้าไม่มี <p> tags ให้สร้าง paragraph เดียว
+			if len(pMatches) == 0 && strings.TrimSpace(segment.Content) != "" {
+				para := createParagraphFromHTML(segment.Content, "")
+				paragraphs = append(paragraphs, para)
+			}
 		}
-
-		// สร้าง paragraph ปกติ
-		para := createParagraphFromHTML(content, attributes)
-		paragraphs = append(paragraphs, para)
-	}
-
-	// ถ้าไม่มี <p> tags ให้สร้าง paragraph เดียว
-	if len(pMatches) == 0 && strings.TrimSpace(content) != "" {
-		para := createParagraphFromHTML(content, "")
-		paragraphs = append(paragraphs, para)
 	}
 
 	return paragraphs
 }
 
-func processFigureTags(content string, paragraphs *[]interface{}) string {
-	// จับ <figure> tags ที่มีรูปภาพ - แก้ไข regex ให้รองรับ format ที่หลากหลายขึ้น
+// โครงสร้างสำหรับ content segment
+type ContentSegment struct {
+	Type      string    // "text" หรือ "figure"
+	Content   string    // สำหรับ text
+	ImageInfo ImageInfo // สำหรับ figure
+}
+
+// ฟังก์ชันแยก content เป็น segments ตามลำดับ
+func parseContentWithFigures(content string) []ContentSegment {
+	var segments []ContentSegment
+	
+	// จับ <figure> tags ที่มีรูปภาพ
 	figureRegex := regexp.MustCompile(`<figure[^>]*class="[^"]*image[^"]*"[^>]*style="[^"]*width:\s*(\d+)%[^"]*"[^>]*>\s*<img[^>]*src="([^"]+)"[^>]*>\s*</figure>`)
 	
-	for figureRegex.MatchString(content) {
-		matches := figureRegex.FindAllStringSubmatch(content, -1)
-		for _, match := range matches {
-			widthPercent := match[1]
-			imageURL := match[2]
-			
-			// โหลดรูปภาพ
-			imageInfo, err := downloadImage(imageURL, widthPercent)
-			if err != nil {
-				fmt.Printf("❌ Error downloading image %s: %v\n", imageURL, err)
-				continue
+	// หา index ของ figure tags ทั้งหมด
+	figureMatches := figureRegex.FindAllStringSubmatchIndex(content, -1)
+	
+	lastIndex := 0
+	
+	for _, match := range figureMatches {
+		start := match[0]
+		end := match[1]
+		widthPercent := content[match[2]:match[3]]
+		imageURL := content[match[4]:match[5]]
+		
+		// เพิ่ม text segment ก่อน figure (ถ้ามี)
+		if start > lastIndex {
+			textContent := content[lastIndex:start]
+			if strings.TrimSpace(textContent) != "" {
+				segments = append(segments, ContentSegment{
+					Type:    "text",
+					Content: textContent,
+				})
 			}
-			
-			// สร้าง paragraph ที่มีรูปภาพ
-			imageParagraph := createImageParagraph(imageInfo)
-			*paragraphs = append(*paragraphs, imageParagraph)
-			
-			fmt.Printf("📷 Added image: %s (width: %s%%)\n", imageURL, widthPercent)
 		}
 		
-		// ลบ figure tags ออกจาก content
-		content = figureRegex.ReplaceAllString(content, "")
+		// โหลดรูปภาพ
+		imageInfo, err := downloadImage(imageURL, widthPercent)
+		if err != nil {
+			fmt.Printf("❌ Error downloading image %s: %v\n", imageURL, err)
+			// ถ้าโหลดรูปไม่ได้ ข้าม figure นี้
+			lastIndex = end
+			continue
+		}
+		
+		// เพิ่ม figure segment
+		segments = append(segments, ContentSegment{
+			Type:      "figure", 
+			ImageInfo: imageInfo,
+		})
+		
+		fmt.Printf("📷 Added image: %s (width: %s%%)\n", imageURL, widthPercent)
+		
+		lastIndex = end
 	}
 	
-	return content
+	// เพิ่ม text segment ท้ายสุด (ถ้ามี)
+	if lastIndex < len(content) {
+		textContent := content[lastIndex:]
+		if strings.TrimSpace(textContent) != "" {
+			segments = append(segments, ContentSegment{
+				Type:    "text",
+				Content: textContent,
+			})
+		}
+	}
+	
+	// ถ้าไม่มี figure เลย ให้ส่งคืน text segment เดียว
+	if len(segments) == 0 && strings.TrimSpace(content) != "" {
+		segments = append(segments, ContentSegment{
+			Type:    "text",
+			Content: content,
+		})
+	}
+	
+	return segments
 }
 
 func downloadImage(url, widthPercent string) (ImageInfo, error) {
