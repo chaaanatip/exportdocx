@@ -17,6 +17,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
+	_ "image/gif"
 )
 
 // โครงสร้างข้อมูลสำหรับ CSV
@@ -527,58 +531,9 @@ func createDocumentFromCSV(zipWriter *zip.Writer, chapters []ChapterData) error 
 	return err
 }
 
-func convertHTMLToParagraphs(htmlContent string) []interface{} {
-	var paragraphs []interface{}
-
-	// ขั้นตอนที่ 1: html.UnescapeString() เพื่อแปลง HTML entities
-	content := html.UnescapeString(htmlContent)
-
-	// ขั้นตอนที่ 2: ลบ HTML comments และ special elements (ยกเว้น figure)
-	content = cleanupHTML(content)
-
-	// ขั้นตอนที่ 3: แยก content เป็น segments โดยคำนึงถึงตำแหน่งของ figure
-	segments := parseContentWithFigures(content)
-
-	// ขั้นตอนที่ 4: แปลงแต่ละ segment
-	for _, segment := range segments {
-		if segment.Type == "figure" {
-			// สร้าง image paragraph
-			imageParagraph := createImageParagraph(segment.ImageInfo)
-			paragraphs = append(paragraphs, imageParagraph)
-		} else if segment.Type == "text" {
-			// แยก paragraphs โดยใช้ <p> tags
-			pRegex := regexp.MustCompile(`<p([^>]*)>(.*?)</p>`)
-			pMatches := pRegex.FindAllStringSubmatch(segment.Content, -1)
-
-			for _, match := range pMatches {
-				attributes := match[1]
-				content := strings.TrimSpace(match[2])
-
-				// จัดการ paragraph ว่างหรือมีแค่ &nbsp;
-				if content == "" || isEmptyOrOnlyNbsp(content) {
-					// สร้าง empty paragraph แต่รักษา attributes (เช่น class="indent-a")
-					para := createEmptyParagraphWithAttributes(attributes)
-					paragraphs = append(paragraphs, para)
-					continue
-				}
-
-				// สร้าง paragraph ปกติ
-				para := createParagraphFromHTML(content, attributes)
-				paragraphs = append(paragraphs, para)
-			}
-
-			// ถ้าไม่มี <p> tags ให้สร้าง paragraph เดียว
-			if len(pMatches) == 0 && strings.TrimSpace(segment.Content) != "" {
-				para := createParagraphFromHTML(segment.Content, "")
-				paragraphs = append(paragraphs, para)
-			}
-		}
-	}
-
-	return paragraphs
-}
 
 // โครงสร้างสำหรับจัดการรูปภาพ
+// เพิ่ม field สำหรับ figcaption ใน ImageInfo struct
 type ImageInfo struct {
 	URL      string
 	Data     []byte
@@ -587,21 +542,23 @@ type ImageInfo struct {
 	Width    int
 	Height   int
 	Align    string // "left", "center", "right"
+	Caption  string // เพิ่มฟิลด์นี้สำหรับ figcaption
 }
 
-// ฟังก์ชันแยก content เป็น segments ตามลำดับ
+// ปรับปรุงฟังก์ชัน parseContentWithFigures เพื่อจับ figcaption
 func parseContentWithFigures(content string) []ContentSegment {
 	var segments []ContentSegment
 	
-	// รวม regex patterns ทั้งหมด
-	allImageRegex := regexp.MustCompile(`(?:<figure[^>]*class="[^"]*image[^"]*"[^>]*>\s*<img[^>]*src="([^"]+)"[^>]*>\s*</figure>)|(?:<p([^>]*)>\s*<img[^>]*src="([^"]+)"[^>]*>\s*</p>)`)
+	// ปรับ regex ให้จับ figcaption ด้วย
+	allImageRegex := regexp.MustCompile(`(?:<figure[^>]*class="[^"]*image[^"]*"[^>]*>\s*<img[^>]*src="([^"]+)"[^>]*>(?:\s*<figcaption[^>]*>([^<]*)</figcaption>)?\s*</figure>(?:\s*<p([^>]*style="[^"]*text-align:\s*(?:left|center|right)[^"]*"[^>]*)>\s*&nbsp;\s*</p>)?)|(?:<p([^>]*)>\s*<img[^>]*src="([^"]+)"[^>]*>\s*</p>)`)
 	
 	// หา index ของ image tags ทั้งหมด
 	imageMatches := allImageRegex.FindAllStringSubmatchIndex(content, -1)
+	allMatches := allImageRegex.FindAllStringSubmatch(content, -1)
 	
 	lastIndex := 0
 	
-	for _, match := range imageMatches {
+	for i, match := range imageMatches {
 		start := match[0]
 		end := match[1]
 		
@@ -618,24 +575,50 @@ func parseContentWithFigures(content string) []ContentSegment {
 		
 		// แยก image tag เพื่อดู attributes
 		imageTag := content[start:end]
+		fullMatch := allMatches[i]
 		
 		// ดึง src URL
-		imageURL := extractImageSrc(imageTag)
+		imageURL := ""
+		figcaption := ""
+		
+		if len(fullMatch) > 1 && fullMatch[1] != "" {
+			// Pattern แรก: <figure><img><figcaption>
+			imageURL = fullMatch[1]
+			if len(fullMatch) > 2 && fullMatch[2] != "" {
+				figcaption = strings.TrimSpace(fullMatch[2])
+			}
+		} else if len(fullMatch) > 5 && fullMatch[5] != "" {
+			// Pattern ที่สอง: <p><img></p>
+			imageURL = fullMatch[5]
+		}
+		
+		if imageURL == "" {
+			lastIndex = end
+			continue
+		}
 		
 		// ดึง width percent
-		widthPercent := extractWidthFromImage(imageTag)
+		widthPercent := "100"
+		if strings.HasPrefix(imageTag, "<figure") {
+			w := extractWidthFromFigure(imageTag)
+			if w != "" {
+				widthPercent = w
+			} else {
+				widthPercent = extractWidthFromImage(imageTag)
+			}
+		} else {
+			widthPercent = extractWidthFromImage(imageTag)
+		}
 		
 		// ดึง align
-		align := extractAlignFromImage(imageTag)
+		align := extractAlignFromImageWithContext(imageTag)
 		
-		fmt.Printf("🔍 Processing image tag: %s\n", imageTag)
-		fmt.Printf("🔍 Extracted URL: %s, Width: %s%%, Align: %s\n", imageURL, widthPercent, align)
+		fmt.Printf("🔍 Processing image: URL=%s, Caption=%s, Width=%s%%, Align=%s\n", imageURL, figcaption, widthPercent, align)
 		
-		// โหลดรูปภาพ
-		imageInfo, err := downloadImageWithAlign(imageURL, widthPercent, align)
+		// โหลดรูปภาพพร้อม caption
+		imageInfo, err := downloadImageWithCaptionAndAlign(imageURL, widthPercent, align, figcaption)
 		if err != nil {
 			fmt.Printf("❌ Error downloading image %s: %v\n", imageURL, err)
-			// ถ้าโหลดรูปไม่ได้ ข้าม image นี้
 			lastIndex = end
 			continue
 		}
@@ -646,7 +629,7 @@ func parseContentWithFigures(content string) []ContentSegment {
 			ImageInfo: imageInfo,
 		})
 		
-		fmt.Printf("📷 Added image: %s (width: %s%%, align: %s)\n", imageURL, widthPercent, align)
+		fmt.Printf("📷 Added image with caption: %s\n", figcaption)
 		
 		lastIndex = end
 	}
@@ -673,197 +656,53 @@ func parseContentWithFigures(content string) []ContentSegment {
 	return segments
 }
 
-// ฟังก์ชันดึง src URL จาก image tag
-func extractImageSrc(imageTag string) string {
-	srcRegex := regexp.MustCompile(`src="([^"]+)"`)
-	if srcMatch := srcRegex.FindStringSubmatch(imageTag); len(srcMatch) > 1 {
-		return srcMatch[1]
-	}
-	return ""
-}
-
-// ฟังก์ชันดึง width จาก image tag (ทั้ง figure และ p)
-func extractWidthFromImage(imageTag string) string {
-	// ตรวจหา width ใน style attribute ของ img
-	imgStyleRegex := regexp.MustCompile(`<img[^>]*style="([^"]*)"`)
-	if imgStyleMatch := imgStyleRegex.FindStringSubmatch(imageTag); len(imgStyleMatch) > 1 {
-		styleContent := imgStyleMatch[1]
-		
-		// ตรวจหา width percentage
-		widthRegex := regexp.MustCompile(`width:\s*(\d+)%`)
-		if widthMatch := widthRegex.FindStringSubmatch(styleContent); len(widthMatch) > 1 {
-			return widthMatch[1]
-		}
-	}
-	
-	// ตรวจหา width ใน style attribute ของ p
-	pStyleRegex := regexp.MustCompile(`<p[^>]*style="([^"]*)"`)
-	if pStyleMatch := pStyleRegex.FindStringSubmatch(imageTag); len(pStyleMatch) > 1 {
-		styleContent := pStyleMatch[1]
-		
-		// ตรวจหา width percentage
-		widthRegex := regexp.MustCompile(`width:\s*(\d+)%`)
-		if widthMatch := widthRegex.FindStringSubmatch(styleContent); len(widthMatch) > 1 {
-			return widthMatch[1]
-		}
-	}
-	
-	// ค่าเริ่มต้น
-	return "100"
-}
-
-// ฟังก์ชันดึง align จาก image tag (ทั้ง figure และ p)
-func extractAlignFromImage(imageTag string) string {
-	fmt.Printf("🔍 Analyzing image tag: %s\n", imageTag)
-	// 1. ตรวจสอบใน style attribute ของ p tag
-	pStyleRegex := regexp.MustCompile(`<p[^>]*style="([^"]*)"`)
-	if pStyleMatch := pStyleRegex.FindStringSubmatch(imageTag); len(pStyleMatch) > 1 {
-		styleContent := pStyleMatch[1]
-		fmt.Printf("🔍 Found p style: %s\n", styleContent)
-		alignRegex := regexp.MustCompile(`text-align:\s*(left|center|right)`)
-		if alignMatch := alignRegex.FindStringSubmatch(styleContent); len(alignMatch) > 1 {
-			fmt.Printf("🔍 Found text-align in p: %s\n", alignMatch[1])
-			return alignMatch[1]
-		}
-	}
-	// 2. ตรวจสอบใน class attribute ของ img
-	imgClassRegex := regexp.MustCompile(`<img[^>]*class="([^"]*)"`)
-	if imgClassMatch := imgClassRegex.FindStringSubmatch(imageTag); len(imgClassMatch) > 1 {
-		classContent := imgClassMatch[1]
-		fmt.Printf("🔍 Found img class: %s\n", classContent)
-		alignClassRegex := regexp.MustCompile(`\b(?:align-?)(left|center|right)\b`)
-		if alignMatch := alignClassRegex.FindStringSubmatch(classContent); len(alignMatch) > 1 {
-			fmt.Printf("🔍 Found align class in img: %s\n", alignMatch[1])
-			return alignMatch[1]
-		}
-	}
-	// 3. ตรวจสอบใน style attribute ของ img
-	imgStyleRegex := regexp.MustCompile(`<img[^>]*style="([^"]*)"`)
-	if imgStyleMatch := imgStyleRegex.FindStringSubmatch(imageTag); len(imgStyleMatch) > 1 {
-		styleContent := imgStyleMatch[1]
-		fmt.Printf("🔍 Found img style: %s\n", styleContent)
-		alignRegex := regexp.MustCompile(`text-align:\s*(left|center|right)`)
-		if alignMatch := alignRegex.FindStringSubmatch(styleContent); len(alignMatch) > 1 {
-			fmt.Printf("🔍 Found text-align in img: %s\n", alignMatch[1])
-			return alignMatch[1]
-		}
-		floatRegex := regexp.MustCompile(`float:\s*(left|right)`)
-		if floatMatch := floatRegex.FindStringSubmatch(styleContent); len(floatMatch) > 1 {
-			fmt.Printf("🔍 Found float in img: %s\n", floatMatch[1])
-			return floatMatch[1]
-		}
-	}
-	fmt.Printf("🔍 No alignment found, using default: left\n")
-	return "left"
-}
-
-// ฟังก์ชันดึง width จาก figure tag
-func extractWidthFromFigure(figureTag string) string {
-	// ตรวจหา width ใน style attribute
-	styleRegex := regexp.MustCompile(`style="([^"]*)"`)
-	if styleMatch := styleRegex.FindStringSubmatch(figureTag); len(styleMatch) > 1 {
-		styleContent := styleMatch[1]
-		
-		// ตรวจหา width percentage
-		widthRegex := regexp.MustCompile(`width:\s*(\d+)%`)
-		if widthMatch := widthRegex.FindStringSubmatch(styleContent); len(widthMatch) > 1 {
-			return widthMatch[1]
-		}
-	}
-	
-	// ค่าเริ่มต้น
-	return "100"
-}
-
-// ฟังก์ชันดึง align จาก figure tag
-func extractAlignFromFigure(figureTag string) string {
-	fmt.Printf("🔍 Analyzing figure tag: %s\n", figureTag)
-	// 1. ตรวจสอบใน style attribute - รองรับหลายรูปแบบ
-	styleRegex := regexp.MustCompile(`style="([^"]*)"`)
-	if styleMatch := styleRegex.FindStringSubmatch(figureTag); len(styleMatch) > 1 {
-		styleContent := styleMatch[1]
-		fmt.Printf("🔍 Found style: %s\n", styleContent)
-		alignRegex := regexp.MustCompile(`text-align:\s*(left|center|right)`)
-		if alignMatch := alignRegex.FindStringSubmatch(styleContent); len(alignMatch) > 1 {
-			fmt.Printf("🔍 Found text-align: %s\n", alignMatch[1])
-			return alignMatch[1]
-		}
-	}
-	classRegex := regexp.MustCompile(`class="([^"]*)"`)
-	if classMatch := classRegex.FindStringSubmatch(figureTag); len(classMatch) > 1 {
-		classContent := classMatch[1]
-		fmt.Printf("🔍 Found class: %s\n", classContent)
-		alignClassRegex := regexp.MustCompile(`\b(?:align-?)(left|center|right)\b`)
-		if alignMatch := alignClassRegex.FindStringSubmatch(classContent); len(alignMatch) > 1 {
-			fmt.Printf("🔍 Found align class: %s\n", alignMatch[1])
-			return alignMatch[1]
-		}
-	}
-	alignRegex := regexp.MustCompile(`align="(left|center|right)"`)
-	if alignMatch := alignRegex.FindStringSubmatch(figureTag); len(alignMatch) > 1 {
-		fmt.Printf("🔍 Found align attribute: %s\n", alignMatch[1])
-		return alignMatch[1]
-	}
-	floatRegex := regexp.MustCompile(`float:\s*(left|right)`)
-	if styleMatch := styleRegex.FindStringSubmatch(figureTag); len(styleMatch) > 1 {
-		if floatMatch := floatRegex.FindStringSubmatch(styleMatch[1]); len(floatMatch) > 1 {
-			fmt.Printf("🔍 Found float: %s\n", floatMatch[1])
-			return floatMatch[1]
-		}
-	}
-	fmt.Printf("🔍 No alignment found, using default: left\n")
-	return "left"
-}
-
-func downloadImageWithAlign(url, widthPercent, align string) (ImageInfo, error) {
-	// ทำความสะอาด URL
+// ฟังก์ชันใหม่สำหรับดาวน์โหลดรูปพร้อม caption
+func downloadImageWithCaptionAndAlign(url, widthPercent, align, caption string) (ImageInfo, error) {
 	url = html.UnescapeString(url)
-	
 	fmt.Printf("🔄 Downloading image: %s\n", url)
-	
-	// ดาวน์โหลดรูปภาพ
-	resp, err := http.Get(url)
+
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return ImageInfo{}, err
 	}
 	defer resp.Body.Close()
-	
-	// ตรวจสอบ status code
-	if resp.StatusCode != 200 {
-		return ImageInfo{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+
+	contentType := resp.Header.Get("Content-Type")
+	fmt.Printf("Content-Type: %s\n", contentType)
+	if !strings.HasPrefix(contentType, "image/") {
+		return ImageInfo{}, fmt.Errorf("not an image: %s", contentType)
 	}
-	
-	// อ่านข้อมูลรูปภาพ
+
 	imageData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return ImageInfo{}, err
 	}
-	
+
 	// สร้างชื่อไฟล์จาก URL hash
 	hasher := md5.New()
 	hasher.Write([]byte(url))
 	hash := hex.EncodeToString(hasher.Sum(nil))
 	
 	// กำหนดนามสกุลไฟล์ตาม Content-Type
-	contentType := resp.Header.Get("Content-Type")
 	ext := ".jpg" // default
 	if strings.Contains(contentType, "png") {
 		ext = ".png"
 	} else if strings.Contains(contentType, "gif") {
 		ext = ".gif"
 	} else if strings.Contains(contentType, "webp") {
-		ext = ".jpg" // แปลง webp เป็ น jpg
+		ext = ".jpg" // แปลง webp เป็น jpg
 	}
 	
 	filename := fmt.Sprintf("image%d_%s%s", imageCounter, hash[:8], ext)
 	
-	// คำนวณขนาดรูป - ใช้ขนาดที่เหมาะสมกับการแสดงผลใน Word
-	width, height := 500, 375 // ขนาดเริ่มต้นที่ใหญ่ขึ้น (4:3 ratio)
+	// คำนวณขนาดรูป
+	width, height := 500, 375 // ขนาดเริ่มต้น
 	
 	// ปรับขนาดตาม widthPercent
 	if wp, err := strconv.Atoi(widthPercent); err == nil {
 		scale := float64(wp) / 100.0
-		// กำหนดขนาดสูงสุดที่ 600px สำหรับความกว้าง
 		maxWidth := 600
 		width = int(float64(maxWidth) * scale)
 		height = width * 3 / 4 // รักษา aspect ratio 4:3
@@ -881,6 +720,7 @@ func downloadImageWithAlign(url, widthPercent, align string) (ImageInfo, error) 
 		Width:    width,
 		Height:   height,
 		Align:    align,
+		Caption:  caption, // เพิ่ม caption
 	}
 	
 	images = append(images, imageInfo)
@@ -889,13 +729,11 @@ func downloadImageWithAlign(url, widthPercent, align string) (ImageInfo, error) 
 	return imageInfo, nil
 }
 
-func downloadImage(url, widthPercent string) (ImageInfo, error) {
-	return downloadImageWithAlign(url, widthPercent, "center")
-}
-
-func createImageParagraph(imageInfo ImageInfo) Paragraph {
-	// คำนวณขนาดใน EMU (English Metric Units)
-	// 1 inch = 914400 EMU, 1 pixel = 9525 EMU (at 96 DPI)
+// ปรับปรุงฟังก์ชัน createImageParagraph เพื่อรวม caption
+func createImageParagraph(imageInfo ImageInfo) []interface{} {
+	var paragraphs []interface{}
+	
+	// คำนวณขนาดใน EMU
 	widthEMU := imageInfo.Width * 9525
 	heightEMU := imageInfo.Height * 9525
 	
@@ -962,33 +800,375 @@ func createImageParagraph(imageInfo ImageInfo) Paragraph {
 		},
 	}
 	
-	// กำหนด alignment ตาม imageInfo.Align
+	// กำหนด alignment
 	var alignment *Jc
 	switch strings.ToLower(imageInfo.Align) {
 	case "left":
 		alignment = &Jc{Val: "left"}
-		fmt.Printf("🔍 Setting image alignment: LEFT\n")
 	case "right": 
 		alignment = &Jc{Val: "right"}
-		fmt.Printf("🔍 Setting image alignment: RIGHT\n")
 	case "center":
 		alignment = &Jc{Val: "center"}
-		fmt.Printf("🔍 Setting image alignment: CENTER\n")
 	default:
-		alignment = &Jc{Val: "center"} // ค่าเริ่มต้น
-		fmt.Printf("🔍 Setting image alignment: CENTER (default)\n")
+		alignment = &Jc{Val: "center"}
 	}
 	
-	return Paragraph{
+	// สร้าง image paragraph
+	imagePara := Paragraph{
 		Props: &PPr{
 			Jc:      alignment,
-			Spacing: &Spacing{After: "240"},
+			Spacing: &Spacing{After: "120"}, // ลดระยะห่างเพื่อให้ติดกับ caption
 		},
 		Runs: []Run{{
 			Drawing: drawing,
 		}},
 	}
+	
+	paragraphs = append(paragraphs, imagePara)
+	
+	// เพิ่ม caption paragraph (ถ้ามี)
+	if strings.TrimSpace(imageInfo.Caption) != "" {
+		captionPara := Paragraph{
+			Props: &PPr{
+				Jc:      alignment, // ใช้ alignment เดียวกับรูป
+				Spacing: &Spacing{After: "240"},
+			},
+			Runs: []Run{{
+				Props: &RPr{
+					Italic: &Italic{}, // ทำให้ caption เป็นตัวเอียง
+					Size:   &Size{Val: "20"}, // ขนาดเล็กกว่าข้อความปกติ
+				},
+				Text: &Text{
+					Value: imageInfo.Caption,
+					Space: "preserve",
+				},
+			}},
+		}
+		paragraphs = append(paragraphs, captionPara)
+	}
+	
+	return paragraphs
 }
+
+// ปรับปรุงการเรียกใช้ใน convertHTMLToParagraphs
+func convertHTMLToParagraphs(htmlContent string) []interface{} {
+	var paragraphs []interface{}
+
+	// ขั้นตอนที่ 1: html.UnescapeString() เพื่อแปลง HTML entities
+	content := html.UnescapeString(htmlContent)
+
+	// ขั้นตอนที่ 2: ลบ HTML comments และ special elements (ยกเว้น figure)
+	content = cleanupHTML(content)
+
+	// ขั้นตอนที่ 3: แยก content เป็น segments โดยคำนึงถึงตำแหน่งของ figure
+	segments := parseContentWithFigures(content)
+
+	// ขั้นตอนที่ 4: แปลงแต่ละ segment
+	for _, segment := range segments {
+		if segment.Type == "figure" {
+			// สร้าง image paragraph พร้อม caption
+			imageParagraphs := createImageParagraph(segment.ImageInfo)
+			for _, para := range imageParagraphs {
+				paragraphs = append(paragraphs, para)
+			}
+		} else if segment.Type == "text" {
+			// แยก paragraphs โดยใช้ <p> tags
+			pRegex := regexp.MustCompile(`<p([^>]*)>(.*?)</p>`)
+			pMatches := pRegex.FindAllStringSubmatch(segment.Content, -1)
+
+			for _, match := range pMatches {
+				attributes := match[1]
+				content := strings.TrimSpace(match[2])
+
+				// จัดการ paragraph ว่างหรือมีแค่ &nbsp;
+				if content == "" || isEmptyOrOnlyNbsp(content) {
+					para := createEmptyParagraphWithAttributes(attributes)
+					paragraphs = append(paragraphs, para)
+					continue
+				}
+
+				// สร้าง paragraph ปกติ
+				para := createParagraphFromHTML(content, attributes)
+				paragraphs = append(paragraphs, para)
+			}
+
+			// ถ้าไม่มี <p> tags ให้สร้าง paragraph เดียว
+			if len(pMatches) == 0 && strings.TrimSpace(segment.Content) != "" {
+				para := createParagraphFromHTML(segment.Content, "")
+				paragraphs = append(paragraphs, para)
+			}
+		}
+	}
+
+	return paragraphs
+}
+
+// New improved function to extract alignment with context
+func extractAlignFromImageWithContext(imageTag string) string {
+	fmt.Printf("🔍 Analyzing image tag with context: %s\n", imageTag)
+	
+	// 1. ตรวจสอบใน <p> tag ที่ตามหลัง figure
+	followingPRegex := regexp.MustCompile(`</figure>\s*<p([^>]*style="[^"]*text-align:\s*(left|center|right)[^"]*"[^>]*)>\s*&nbsp;\s*</p>`)
+	if followingPMatch := followingPRegex.FindStringSubmatch(imageTag); len(followingPMatch) > 2 {
+		align := followingPMatch[2]
+		fmt.Printf("🔍 Found text-align in following p tag: %s\n", align)
+		return align
+	}
+	
+	// 2. ตรวจสอบใน style attribute ของ p tag (สำหรับ <p><img></p> pattern)
+	pStyleRegex := regexp.MustCompile(`<p[^>]*style="([^"]*)"`)
+	if pStyleMatch := pStyleRegex.FindStringSubmatch(imageTag); len(pStyleMatch) > 1 {
+		styleContent := pStyleMatch[1]
+		fmt.Printf("🔍 Found p style: %s\n", styleContent)
+		alignRegex := regexp.MustCompile(`text-align:\s*(left|center|right)`)
+		if alignMatch := alignRegex.FindStringSubmatch(styleContent); len(alignMatch) > 1 {
+			fmt.Printf("🔍 Found text-align in p: %s\n", alignMatch[1])
+			return alignMatch[1]
+		}
+	}
+	
+	// 3. ตรวจสอบใน figure tag
+	if strings.HasPrefix(imageTag, "<figure") {
+		align := extractAlignFromFigure(imageTag)
+		if align != "left" { // ถ้าไม่ใช่ค่าเริ่มต้น
+			return align
+		}
+	}
+	
+	// 4. ตรวจสอบใน img tag
+	align := extractAlignFromImage(imageTag)
+	return align
+}
+
+// Also update the regex pattern in the main function to better capture figure + p combinations
+// Replace the existing allImageRegex with this improved version:
+
+// In parseContentWithFigures function, replace the regex with:
+// allImageRegex := regexp.MustCompile(`(?:<figure[^>]*class="[^"]*image[^"]*"[^>]*>\s*<img[^>]*src="([^"]+)"[^>]*>(?:[^<]*<figcaption[^>]*>[^<]*</figcaption>)?\s*</figure>(?:\s*<p([^>]*style="[^"]*text-align:\s*(?:left|center|right)[^"]*"[^>]*)>\s*&nbsp;\s*</p>)?)|(?:<p([^>]*)>\s*<img[^>]*src="([^"]+)"[^>]*>\s*</p>)`)
+
+// ฟังก์ชันดึง src URL จาก image tag
+func extractImageSrc(imageTag string) string {
+	srcRegex := regexp.MustCompile(`src="([^"]+)"`)
+	if srcMatch := srcRegex.FindStringSubmatch(imageTag); len(srcMatch) > 1 {
+		return srcMatch[1]
+	}
+	return ""
+}
+
+// ฟังก์ชันดึง width จาก image tag (ทั้ง figure และ p)
+func extractWidthFromImage(imageTag string) string {
+	// ตรวจสอบใน style attribute ของ img
+	imgStyleRegex := regexp.MustCompile(`<img[^>]*style="([^"]*)"`)
+	if imgStyleMatch := imgStyleRegex.FindStringSubmatch(imageTag); len(imgStyleMatch) > 1 {
+		styleContent := imgStyleMatch[1]
+		
+		// ตรวจสอบ width percentage
+		widthRegex := regexp.MustCompile(`width:\s*(\d+)%`)
+		if widthMatch := widthRegex.FindStringSubmatch(styleContent); len(widthMatch) > 1 {
+			return widthMatch[1]
+		}
+	}
+	
+	// ตรวจสอบใน style attribute ของ p
+	pStyleRegex := regexp.MustCompile(`<p[^>]*style="([^"]*)"`)
+	if pStyleMatch := pStyleRegex.FindStringSubmatch(imageTag); len(pStyleMatch) > 1 {
+		styleContent := pStyleMatch[1]
+		
+		// ตรวจสอบ width percentage
+		widthRegex := regexp.MustCompile(`width:\s*(\d+)%`)
+		if widthMatch := widthRegex.FindStringSubmatch(styleContent); len(widthMatch) > 1 {
+			return widthMatch[1]
+		}
+	}
+	
+	// ค่าเริ่มต้น
+	return "100"
+}
+
+// ฟังก์ชันดึง align จาก image tag (ทั้ง figure และ p)
+func extractAlignFromImage(imageTag string) string {
+	fmt.Printf("🔍 Analyzing image tag: %s\n", imageTag)
+	// 1. ตรวจสอบใน style attribute ของ p tag
+	pStyleRegex := regexp.MustCompile(`<p[^>]*style="([^"]*)"`)
+	if pStyleMatch := pStyleRegex.FindStringSubmatch(imageTag); len(pStyleMatch) > 1 {
+		styleContent := pStyleMatch[1]
+		fmt.Printf("🔍 Found p style: %s\n", styleContent)
+		alignRegex := regexp.MustCompile(`text-align:\s*(left|center|right)`)
+		if alignMatch := alignRegex.FindStringSubmatch(styleContent); len(alignMatch) > 1 {
+			fmt.Printf("🔍 Found text-align in p: %s\n", alignMatch[1])
+			return alignMatch[1]
+		}
+	}
+	// 2. ตรวจสอบใน class attribute ของ img
+	imgClassRegex := regexp.MustCompile(`<img[^>]*class="([^"]*)"`)
+	if imgClassMatch := imgClassRegex.FindStringSubmatch(imageTag); len(imgClassMatch) > 1 {
+		classContent := imgClassMatch[1]
+		fmt.Printf("🔍 Found img class: %s\n", classContent)
+		alignClassRegex := regexp.MustCompile(`\b(?:align-?)(left|center|right)\b`)
+		if alignMatch := alignClassRegex.FindStringSubmatch(classContent); len(alignMatch) > 1 {
+			fmt.Printf("🔍 Found align class in img: %s\n", alignMatch[1])
+			return alignMatch[1]
+		}
+	}
+	// 3. ตรวจสอบใน style attribute ของ img
+	imgStyleRegex := regexp.MustCompile(`<img[^>]*style="([^"]*)"`)
+	if imgStyleMatch := imgStyleRegex.FindStringSubmatch(imageTag); len(imgStyleMatch) > 1 {
+		styleContent := imgStyleMatch[1]
+		fmt.Printf("🔍 Found img style: %s\n", styleContent)
+		alignRegex := regexp.MustCompile(`text-align:\s*(left|center|right)`)
+		if alignMatch := alignRegex.FindStringSubmatch(styleContent); len(alignMatch) > 1 {
+			fmt.Printf("🔍 Found text-align in img: %s\n", alignMatch[1])
+			return alignMatch[1]
+		}
+		floatRegex := regexp.MustCompile(`float:\s*(left|right)`)
+		if floatMatch := floatRegex.FindStringSubmatch(styleContent); len(floatMatch) > 1 {
+			fmt.Printf("🔍 Found float in img: %s\n", floatMatch[1])
+			return floatMatch[1]
+		}
+	}
+	fmt.Printf("🔍 No alignment found, using default: left\n")
+	return "left"
+}
+
+// ฟังก์ชันดึง width จาก figure tag
+func extractWidthFromFigure(figureTag string) string {
+	styleRegex := regexp.MustCompile(`style="([^"]*)"`)
+	if styleMatch := styleRegex.FindStringSubmatch(figureTag); len(styleMatch) > 1 {
+		styleContent := styleMatch[1]
+		widthRegex := regexp.MustCompile(`width:\s*(\d+)%`)
+		if widthMatch := widthRegex.FindStringSubmatch(styleContent); len(widthMatch) > 1 {
+			return widthMatch[1]
+		}
+	}
+	return ""
+}
+
+// ฟังก์ชันดึง align จาก figure tag
+func extractAlignFromFigure(figureTag string) string {
+	fmt.Printf("🔍 Analyzing figure tag: %s\n", figureTag)
+	// 1. ตรวจสอบใน style attribute - รองรับหลายรูปแบบ
+	styleRegex := regexp.MustCompile(`style="([^"]*)"`)
+	if styleMatch := styleRegex.FindStringSubmatch(figureTag); len(styleMatch) > 1 {
+		styleContent := styleMatch[1]
+		fmt.Printf("🔍 Found style: %s\n", styleContent)
+		alignRegex := regexp.MustCompile(`text-align:\s*(left|center|right)`)
+		if alignMatch := alignRegex.FindStringSubmatch(styleContent); len(alignMatch) > 1 {
+			fmt.Printf("🔍 Found text-align: %s\n", alignMatch[1])
+			return alignMatch[1]
+		}
+	}
+	classRegex := regexp.MustCompile(`class="([^"]*)"`)
+	if classMatch := classRegex.FindStringSubmatch(figureTag); len(classMatch) > 1 {
+		classContent := classMatch[1]
+		fmt.Printf("🔍 Found class: %s\n", classContent)
+		alignClassRegex := regexp.MustCompile(`\b(?:align-?)(left|center|right)\b`)
+		if alignMatch := alignClassRegex.FindStringSubmatch(classContent); len(alignMatch) > 1 {
+			fmt.Printf("🔍 Found align class: %s\n", alignMatch[1])
+			return alignMatch[1]
+		}
+	}
+	alignRegex := regexp.MustCompile(`align="(left|center|right)"`)
+	if alignMatch := alignRegex.FindStringSubmatch(figureTag); len(alignMatch) > 1 {
+		fmt.Printf("🔍 Found align attribute: %s\n", alignMatch[1])
+		return alignMatch[1]
+	}
+	floatRegex := regexp.MustCompile(`float:\s*(left|right)`)
+	if styleMatch := styleRegex.FindStringSubmatch(figureTag); len(styleMatch) > 1 {
+		if floatMatch := floatRegex.FindStringSubmatch(styleMatch[1]); len(floatMatch) > 1 {
+			fmt.Printf("🔍 Found float: %s\n", floatMatch[1])
+			return floatMatch[1]
+		}
+	}
+	fmt.Printf("🔍 No alignment found, using default: left\n")
+	return "left"
+}
+
+func downloadImageWithAlign(url, widthPercent, align string) (ImageInfo, error) {
+	url = html.UnescapeString(url)
+	fmt.Printf("🔄 Downloading image: %s\n", url)
+
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ImageInfo{}, err
+	}
+	defer resp.Body.Close()
+
+	contentType := resp.Header.Get("Content-Type")
+	fmt.Printf("Content-Type: %s\n", contentType)
+	if !strings.HasPrefix(contentType, "image/") {
+		return ImageInfo{}, fmt.Errorf("not an image: %s", contentType)
+	}
+
+	imageData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ImageInfo{}, err
+	}
+
+	// สร้างชื่อไฟล์จาก URL hash
+	hasher := md5.New()
+	hasher.Write([]byte(url))
+	hash := hex.EncodeToString(hasher.Sum(nil))
+	
+	// กำหนดนามสกุลไฟล์ตาม Content-Type
+	ext := ".jpg" // default
+	if strings.Contains(contentType, "png") {
+		ext = ".png"
+	} else if strings.Contains(contentType, "gif") {
+		ext = ".gif"
+	} else if strings.Contains(contentType, "webp") {
+		ext = ".jpg" // แปลง webp เป็น jpg
+	}
+	
+	filename := fmt.Sprintf("image%d_%s%s", imageCounter, hash[:8], ext)
+	
+	// คำนวณขนาดรูป - ใช้ขนาดที่เหมาะสมกับการแสดงผลใน Word
+	width, height := 500, 375 // ขนาดเริ่มต้นที่ใหญ่ขึ้น (4:3 ratio)
+	
+	// ปรับขนาดตาม widthPercent
+	if wp, err := strconv.Atoi(widthPercent); err == nil {
+		scale := float64(wp) / 100.0
+		// กำหนดขนาดสูงสุดที่ 600px สำหรับความกว้าง
+		maxWidth := 600
+		width = int(float64(maxWidth) * scale)
+		height = width * 3 / 4 // รักษา aspect ratio 4:3
+	}
+	
+	// สร้าง relationship ID
+	relId := fmt.Sprintf("rId%d", relCounter)
+	relCounter++
+	
+	imageInfo := ImageInfo{
+		URL:      url,
+		Data:     imageData,
+		Filename: filename,
+		RelId:    relId,
+		Width:    width,
+		Height:   height,
+		Align:    align,
+	}
+	
+	images = append(images, imageInfo)
+	imageCounter++
+	
+	// หลังจากอ่าน imageData ...
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(imageData))
+	if err != nil {
+		// fallback ขนาด default
+		cfg.Width, cfg.Height = 400, 300
+	}
+
+	imageInfo.Width, imageInfo.Height = width, height
+	
+	return imageInfo, nil
+}
+
+func downloadImage(url, widthPercent string) (ImageInfo, error) {
+	return downloadImageWithAlign(url, widthPercent, "center")
+}
+
+
 
 func createDocumentRels(zipWriter *zip.Writer) error {
 	w, err := zipWriter.Create("word/_rels/document.xml.rels")
@@ -1457,4 +1637,48 @@ func createStyles(zipWriter *zip.Writer) error {
 
 	_, err = w.Write([]byte(content))
 	return err
+}
+
+func parseImageSizeFromStyle(style string, realWidth, realHeight int) (width, height int) {
+	width, height = realWidth, realHeight
+	maxWidth := 600 // px
+
+	// width: 300px
+	if m := regexp.MustCompile(`width:\s*(\d+)px`).FindStringSubmatch(style); len(m) > 1 {
+		if w, err := strconv.Atoi(m[1]); err == nil {
+			width = w
+		}
+	}
+	// width: 50%
+	if m := regexp.MustCompile(`width:\s*(\d+)%`).FindStringSubmatch(style); len(m) > 1 {
+		if percent, err := strconv.Atoi(m[1]); err == nil {
+			width = int(float64(maxWidth) * float64(percent) / 100.0)
+		}
+	}
+	// max-width: ...
+	if m := regexp.MustCompile(`max-width:\s*(\d+)px`).FindStringSubmatch(style); len(m) > 1 {
+		if mw, err := strconv.Atoi(m[1]); err == nil && width > mw {
+			width = mw
+		}
+	}
+	// width: fit-content, width: auto
+	if regexp.MustCompile(`width:\s*(fit-content|auto)`).MatchString(style) {
+		width = realWidth
+	}
+	// height: ... (optional, ถ้าอยากรองรับ)
+	// ... (คล้าย width)
+
+	// รักษา aspect ratio
+	if realWidth > 0 {
+		height = int(float64(width) * float64(realHeight) / float64(realWidth))
+	}
+	return
+}
+
+func extractStyleFromImageTag(imageTag string) string {
+	imgStyleRegex := regexp.MustCompile(`<img[^>]*style="([^"]*)"`)
+	if imgStyleMatch := imgStyleRegex.FindStringSubmatch(imageTag); len(imgStyleMatch) > 1 {
+		return imgStyleMatch[1]
+	}
+	return ""
 }
