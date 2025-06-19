@@ -3,26 +3,23 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/md5"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"html"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 // โครงสร้างข้อมูลสำหรับ CSV
-
-type Hyperlink struct {
-    XMLName xml.Name `xml:"w:hyperlink"`
-    Id      string   `xml:"r:id,attr"`
-    Runs    []Run    `xml:"w:r"`
-}
-
 type ChapterData struct {
 	ID      string
 	Chapter string
@@ -33,7 +30,10 @@ type ChapterData struct {
 type Document struct {
 	XMLName  xml.Name `xml:"w:document"`
 	Xmlns    string   `xml:"xmlns:w,attr"`
-	XmlnsW14 string   `xml:"xmlns:w14,attr"`
+	XmlnsR   string   `xml:"xmlns:r,attr"`
+	XmlnsWP  string   `xml:"xmlns:wp,attr"`
+	XmlnsA   string   `xml:"xmlns:a,attr"`
+	XmlnsPic string   `xml:"xmlns:pic,attr"`
 	Body     Body     `xml:"w:body"`
 }
 
@@ -83,6 +83,143 @@ type Run struct {
 	Props   *RPr     `xml:"w:rPr,omitempty"`
 	Text    *Text    `xml:"w:t,omitempty"`
 	Break   *Break   `xml:"w:br,omitempty"`
+	Drawing *Drawing `xml:"w:drawing,omitempty"`
+}
+
+type Drawing struct {
+	XMLName xml.Name `xml:"w:drawing"`
+	Inline  *Inline  `xml:"wp:inline"`
+}
+
+type Inline struct {
+	XMLName    xml.Name `xml:"wp:inline"`
+	DistT      string   `xml:"distT,attr"`
+	DistB      string   `xml:"distB,attr"`
+	DistL      string   `xml:"distL,attr"`
+	DistR      string   `xml:"distR,attr"`
+	Extent     Extent   `xml:"wp:extent"`
+	EffectExt  EffectExt `xml:"wp:effectExtent"`
+	DocPr      DocPr    `xml:"wp:docPr"`
+	CNvGraphicFramePr CNvGraphicFramePr `xml:"wp:cNvGraphicFramePr"`
+	Graphic    Graphic  `xml:"a:graphic"`
+}
+
+type Extent struct {
+	XMLName xml.Name `xml:"wp:extent"`
+	Cx      string   `xml:"cx,attr"`
+	Cy      string   `xml:"cy,attr"`
+}
+
+type EffectExt struct {
+	XMLName xml.Name `xml:"wp:effectExtent"`
+	L       string   `xml:"l,attr"`
+	T       string   `xml:"t,attr"`
+	R       string   `xml:"r,attr"`
+	B       string   `xml:"b,attr"`
+}
+
+type DocPr struct {
+	XMLName xml.Name `xml:"wp:docPr"`
+	Id      string   `xml:"id,attr"`
+	Name    string   `xml:"name,attr"`
+}
+
+type CNvGraphicFramePr struct {
+	XMLName xml.Name `xml:"wp:cNvGraphicFramePr"`
+	GraphicFrameLocks GraphicFrameLocks `xml:"a:graphicFrameLocks"`
+}
+
+type GraphicFrameLocks struct {
+	XMLName         xml.Name `xml:"a:graphicFrameLocks"`
+	NoChangeAspect  string   `xml:"noChangeAspect,attr"`
+}
+
+type Graphic struct {
+	XMLName    xml.Name    `xml:"a:graphic"`
+	GraphicData GraphicData `xml:"a:graphicData"`
+}
+
+type GraphicData struct {
+	XMLName xml.Name `xml:"a:graphicData"`
+	Uri     string   `xml:"uri,attr"`
+	Pic     Pic      `xml:"pic:pic"`
+}
+
+type Pic struct {
+	XMLName   xml.Name   `xml:"pic:pic"`
+	NvPicPr   NvPicPr    `xml:"pic:nvPicPr"`
+	BlipFill  BlipFill   `xml:"pic:blipFill"`
+	SpPr      SpPr       `xml:"pic:spPr"`
+}
+
+type NvPicPr struct {
+	XMLName xml.Name `xml:"pic:nvPicPr"`
+	CNvPr   CNvPr    `xml:"pic:cNvPr"`
+	CNvPicPr CNvPicPr `xml:"pic:cNvPicPr"`
+}
+
+type CNvPr struct {
+	XMLName xml.Name `xml:"pic:cNvPr"`
+	Id      string   `xml:"id,attr"`
+	Name    string   `xml:"name,attr"`
+}
+
+type CNvPicPr struct {
+	XMLName xml.Name `xml:"pic:cNvPicPr"`
+}
+
+type BlipFill struct {
+	XMLName xml.Name `xml:"pic:blipFill"`
+	Blip    Blip     `xml:"a:blip"`
+	Stretch Stretch  `xml:"a:stretch"`
+}
+
+type Blip struct {
+	XMLName xml.Name `xml:"a:blip"`
+	Embed   string   `xml:"r:embed,attr"`
+}
+
+type Stretch struct {
+	XMLName  xml.Name  `xml:"a:stretch"`
+	FillRect FillRect  `xml:"a:fillRect"`
+}
+
+type FillRect struct {
+	XMLName xml.Name `xml:"a:fillRect"`
+}
+
+type SpPr struct {
+	XMLName xml.Name `xml:"pic:spPr"`
+	Xfrm    Xfrm     `xml:"a:xfrm"`
+	PrstGeom PrstGeom `xml:"a:prstGeom"`
+}
+
+type Xfrm struct {
+	XMLName xml.Name `xml:"a:xfrm"`
+	Off     Off      `xml:"a:off"`
+	Ext     Ext      `xml:"a:ext"`
+}
+
+type Off struct {
+	XMLName xml.Name `xml:"a:off"`
+	X       string   `xml:"x,attr"`
+	Y       string   `xml:"y,attr"`
+}
+
+type Ext struct {
+	XMLName xml.Name `xml:"a:ext"`
+	Cx      string   `xml:"cx,attr"`
+	Cy      string   `xml:"cy,attr"`
+}
+
+type PrstGeom struct {
+	XMLName xml.Name `xml:"a:prstGeom"`
+	Prst    string   `xml:"prst,attr"`
+	AvLst   AvLst    `xml:"a:avLst"`
+}
+
+type AvLst struct {
+	XMLName xml.Name `xml:"a:avLst"`
 }
 
 type RPr struct {
@@ -150,6 +287,36 @@ type OutlineLvl struct {
 	Val     string   `xml:"w:val,attr"`
 }
 
+// โครงสร้างสำหรับ relationships
+type Relationship struct {
+	Id     string `xml:"Id,attr"`
+	Type   string `xml:"Type,attr"`
+	Target string `xml:"Target,attr"`
+}
+
+type Relationships struct {
+	XMLName xml.Name `xml:"Relationships"`
+	Xmlns   string   `xml:"xmlns,attr"`
+	Items   []Relationship `xml:"Relationship"`
+}
+
+// โครงสร้างสำหรับจัดการรูปภาพ
+type ImageInfo struct {
+	URL      string
+	Data     []byte
+	Filename string
+	RelId    string
+	Width    int
+	Height   int
+}
+
+// ตัวแปรสำหรับเก็บรูปภาพ
+var (
+	imageCounter = 1
+	images       []ImageInfo
+	relCounter   = 2 // เริ่มจาก 2 เพราะ rId1 ใช้กับ styles.xml
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("การใช้งาน: go run main.go <ไฟล์_csv>")
@@ -170,6 +337,11 @@ func main() {
 
 	fmt.Printf("พบ %d บท\n", len(chapters))
 
+	// Reset ตัวแปรสำหรับรูปภาพ
+	imageCounter = 1
+	images = []ImageInfo{}
+	relCounter = 2
+
 	// Export เป็น DOCX
 	fmt.Printf("กำลังสร้างไฟล์ DOCX: %s\n", docxFile)
 	err = exportToDocx(chapters, docxFile)
@@ -178,6 +350,9 @@ func main() {
 	}
 
 	fmt.Printf("✅ สำเร็จ! ไฟล์ถูกสร้างที่: %s\n", docxFile)
+	if len(images) > 0 {
+		fmt.Printf("📷 โหลดรูปภาพ %d รูป\n", len(images))
+	}
 }
 
 func readChapterCSV(filename string) ([]ChapterData, error) {
@@ -260,7 +435,21 @@ func exportToDocx(chapters []ChapterData, filename string) error {
 	}
 
 	// สร้าง document.xml จาก CSV data
-	return createDocumentFromCSV(zipWriter, chapters)
+	if err := createDocumentFromCSV(zipWriter, chapters); err != nil {
+		return err
+	}
+
+	// สร้าง document.xml.rels สำหรับรูปภาพ
+	if err := createDocumentRels(zipWriter); err != nil {
+		return err
+	}
+
+	// เพิ่มรูปภาพลงใน ZIP
+	if err := addImagesToZip(zipWriter); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func createDocumentFromCSV(zipWriter *zip.Writer, chapters []ChapterData) error {
@@ -271,7 +460,10 @@ func createDocumentFromCSV(zipWriter *zip.Writer, chapters []ChapterData) error 
 
 	doc := Document{
 		Xmlns:    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
-		XmlnsW14: "http://schemas.microsoft.com/office/word/2010/wordml",
+		XmlnsR:   "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+		XmlnsWP:  "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+		XmlnsA:   "http://schemas.openxmlformats.org/drawingml/2006/main",
+		XmlnsPic: "http://schemas.openxmlformats.org/drawingml/2006/picture",
 		Body: Body{
 			Content: []interface{}{},
 			SectPr: SectPr{
@@ -292,27 +484,25 @@ func createDocumentFromCSV(zipWriter *zip.Writer, chapters []ChapterData) error 
 		}
 
 		// หัวข้อบท - ใช้ชื่อบทจาก CSV
-	// แทนบล็อกเดิมที่สร้าง title:
-title := Paragraph{
-  Props: &PPr{
-    // กำหนดให้เป็น Heading1 เพื่อโผล่ใน Navigation Pane
-    PStyle:    &PStyle{Val: "Heading1"},
-    OutlineLvl:&OutlineLvl{Val: "0"},       // ระดับ 0 = หัวข้อหลัก
-    Spacing:   &Spacing{Before: "480", After: "240"},
-  },
-  Runs: []Run{{
-    Props: &RPr{
-      Bold: &Bold{},       // ตัวหนาแบบเดิม
-      Size: &Size{Val: "28"},
-    },
-    Text: &Text{
-      Value: chapter.Chapter,
-      Space: "preserve",
-    },
-  }},
-}
-doc.Body.Content = append(doc.Body.Content, title)
-
+		title := Paragraph{
+			Props: &PPr{
+				// กำหนดให้เป็น Heading1 เพื่อโผล่ใน Navigation Pane
+				PStyle:     &PStyle{Val: "Heading1"},
+				OutlineLvl: &OutlineLvl{Val: "0"},       // ระดับ 0 = หัวข้อหลัก
+				Spacing:    &Spacing{Before: "480", After: "240"},
+			},
+			Runs: []Run{{
+				Props: &RPr{
+					Bold: &Bold{},       // ตัวหนาแบบเดิม
+					Size: &Size{Val: "28"},
+				},
+				Text: &Text{
+					Value: chapter.Chapter,
+					Space: "preserve",
+				},
+			}},
+		}
+		doc.Body.Content = append(doc.Body.Content, title)
 
 		// แปลง body content
 		bodyParagraphs := convertHTMLToParagraphs(chapter.Body)
@@ -340,16 +530,19 @@ doc.Body.Content = append(doc.Body.Content, title)
 	return err
 }
 
-func convertHTMLToParagraphs(htmlContent string) []Paragraph {
-	var paragraphs []Paragraph
+func convertHTMLToParagraphs(htmlContent string) []interface{} {
+	var paragraphs []interface{}
 
 	// ขั้นตอนที่ 1: html.UnescapeString() เพื่อแปลง HTML entities
 	content := html.UnescapeString(htmlContent)
 
-	// ขั้นตอนที่ 2: ลบ HTML comments และ special elements
+	// ขั้นตอนที่ 2: จัดการ <figure> tags ก่อน
+	content = processFigureTags(content, &paragraphs)
+
+	// ขั้นตอนที่ 3: ลบ HTML comments และ special elements
 	content = cleanupHTML(content)
 
-	// ขั้นตอนที่ 3: แยก paragraphs โดยใช้ <p> tags
+	// ขั้นตอนที่ 4: แยก paragraphs โดยใช้ <p> tags
 	pRegex := regexp.MustCompile(`<p([^>]*)>(.*?)</p>`)
 	pMatches := pRegex.FindAllStringSubmatch(content, -1)
 
@@ -371,12 +564,256 @@ func convertHTMLToParagraphs(htmlContent string) []Paragraph {
 	}
 
 	// ถ้าไม่มี <p> tags ให้สร้าง paragraph เดียว
-	if len(paragraphs) == 0 {
+	if len(pMatches) == 0 && strings.TrimSpace(content) != "" {
 		para := createParagraphFromHTML(content, "")
 		paragraphs = append(paragraphs, para)
 	}
 
 	return paragraphs
+}
+
+func processFigureTags(content string, paragraphs *[]interface{}) string {
+	// จับ <figure> tags ที่มีรูปภาพ - แก้ไข regex ให้รองรับ format ที่หลากหลายขึ้น
+	figureRegex := regexp.MustCompile(`<figure[^>]*class="[^"]*image[^"]*"[^>]*style="[^"]*width:\s*(\d+)%[^"]*"[^>]*>\s*<img[^>]*src="([^"]+)"[^>]*>\s*</figure>`)
+	
+	for figureRegex.MatchString(content) {
+		matches := figureRegex.FindAllStringSubmatch(content, -1)
+		for _, match := range matches {
+			widthPercent := match[1]
+			imageURL := match[2]
+			
+			// โหลดรูปภาพ
+			imageInfo, err := downloadImage(imageURL, widthPercent)
+			if err != nil {
+				fmt.Printf("❌ Error downloading image %s: %v\n", imageURL, err)
+				continue
+			}
+			
+			// สร้าง paragraph ที่มีรูปภาพ
+			imageParagraph := createImageParagraph(imageInfo)
+			*paragraphs = append(*paragraphs, imageParagraph)
+			
+			fmt.Printf("📷 Added image: %s (width: %s%%)\n", imageURL, widthPercent)
+		}
+		
+		// ลบ figure tags ออกจาก content
+		content = figureRegex.ReplaceAllString(content, "")
+	}
+	
+	return content
+}
+
+func downloadImage(url, widthPercent string) (ImageInfo, error) {
+	// ทำความสะอาด URL
+	url = html.UnescapeString(url)
+	
+	fmt.Printf("🔄 Downloading image: %s\n", url)
+	
+	// ดาวน์โหลดรูปภาพ
+	resp, err := http.Get(url)
+	if err != nil {
+		return ImageInfo{}, err
+	}
+	defer resp.Body.Close()
+	
+	// ตรวจสอบ status code
+	if resp.StatusCode != 200 {
+		return ImageInfo{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+	
+	// อ่านข้อมูลรูปภาพ
+	imageData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ImageInfo{}, err
+	}
+	
+	// สร้างชื่อไฟล์จาก URL hash
+	hasher := md5.New()
+	hasher.Write([]byte(url))
+	hash := hex.EncodeToString(hasher.Sum(nil))
+	
+	// กำหนดนามสกุลไฟล์ตาม Content-Type
+	contentType := resp.Header.Get("Content-Type")
+	ext := ".jpg" // default
+	if strings.Contains(contentType, "png") {
+		ext = ".png"
+	} else if strings.Contains(contentType, "gif") {
+		ext = ".gif"
+	} else if strings.Contains(contentType, "webp") {
+		ext = ".jpg" // แปลง webp เป็น jpg
+	}
+	
+	filename := fmt.Sprintf("image%d_%s%s", imageCounter, hash[:8], ext)
+	
+	// คำนวณขนาดรูป - ใช้ขนาดที่เหมาะสมกับการแสดงผลใน Word
+	width, height := 500, 375 // ขนาดเริ่มต้นที่ใหญ่ขึ้น (4:3 ratio)
+	
+	// ปรับขนาดตาม widthPercent
+	if wp, err := strconv.Atoi(widthPercent); err == nil {
+		scale := float64(wp) / 100.0
+		// กำหนดขนาดสูงสุดที่ 600px สำหรับความกว้าง
+		maxWidth := 600
+		width = int(float64(maxWidth) * scale)
+		height = width * 3 / 4 // รักษา aspect ratio 4:3
+	}
+	
+	// สร้าง relationship ID
+	relId := fmt.Sprintf("rId%d", relCounter)
+	relCounter++
+	
+	imageInfo := ImageInfo{
+		URL:      url,
+		Data:     imageData,
+		Filename: filename,
+		RelId:    relId,
+		Width:    width,
+		Height:   height,
+	}
+	
+	images = append(images, imageInfo)
+	imageCounter++
+	
+	return imageInfo, nil
+}
+
+func createImageParagraph(imageInfo ImageInfo) Paragraph {
+	// คำนวณขนาดใน EMU (English Metric Units)
+	// 1 inch = 914400 EMU, 1 pixel = 9525 EMU (at 96 DPI)
+	widthEMU := imageInfo.Width * 9525
+	heightEMU := imageInfo.Height * 9525
+	
+	drawing := &Drawing{
+		Inline: &Inline{
+			DistT: "0",
+			DistB: "0", 
+			DistL: "0",
+			DistR: "0",
+			Extent: Extent{
+				Cx: strconv.Itoa(widthEMU),
+				Cy: strconv.Itoa(heightEMU),
+			},
+			EffectExt: EffectExt{
+				L: "0",
+				T: "0", 
+				R: "0",
+				B: "0",
+			},
+			DocPr: DocPr{
+				Id:   strconv.Itoa(imageCounter),
+				Name: imageInfo.Filename,
+			},
+			CNvGraphicFramePr: CNvGraphicFramePr{
+				GraphicFrameLocks: GraphicFrameLocks{
+					NoChangeAspect: "1",
+				},
+			},
+			Graphic: Graphic{
+				GraphicData: GraphicData{
+					Uri: "http://schemas.openxmlformats.org/drawingml/2006/picture",
+					Pic: Pic{
+						NvPicPr: NvPicPr{
+							CNvPr: CNvPr{
+								Id:   "0",
+								Name: imageInfo.Filename,
+							},
+							CNvPicPr: CNvPicPr{},
+						},
+						BlipFill: BlipFill{
+							Blip: Blip{
+								Embed: imageInfo.RelId,
+							},
+							Stretch: Stretch{
+								FillRect: FillRect{},
+							},
+						},
+						SpPr: SpPr{
+							Xfrm: Xfrm{
+								Off: Off{X: "0", Y: "0"},
+								Ext: Ext{
+									Cx: strconv.Itoa(widthEMU),
+									Cy: strconv.Itoa(heightEMU),
+								},
+							},
+							PrstGeom: PrstGeom{
+								Prst:  "rect",
+								AvLst: AvLst{},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	
+	return Paragraph{
+		Props: &PPr{
+			Jc:      &Jc{Val: "center"}, // จัดกลาง
+			Spacing: &Spacing{After: "240"},
+		},
+		Runs: []Run{{
+			Drawing: drawing,
+		}},
+	}
+}
+
+func createDocumentRels(zipWriter *zip.Writer) error {
+	w, err := zipWriter.Create("word/_rels/document.xml.rels")
+	if err != nil {
+		return err
+	}
+
+	relationships := Relationships{
+		Xmlns: "http://schemas.openxmlformats.org/package/2006/relationships",
+		Items: []Relationship{},
+	}
+
+	// เพิ่ม relationship สำหรับ styles.xml
+	relationships.Items = append(relationships.Items, Relationship{
+		Id:     "rId1",
+		Type:   "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+		Target: "styles.xml",
+	})
+
+	// เพิ่ม relationships สำหรับรูปภาพ
+	for _, img := range images {
+		relationships.Items = append(relationships.Items, Relationship{
+			Id:     img.RelId,
+			Type:   "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+			Target: "media/" + img.Filename,
+		})
+	}
+
+	// เขียน XML
+	xmlHeader := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n"
+	
+	var buf bytes.Buffer
+	encoder := xml.NewEncoder(&buf)
+	encoder.Indent("", "  ")
+
+	if err := encoder.Encode(relationships); err != nil {
+		return err
+	}
+
+	if _, err = w.Write([]byte(xmlHeader)); err != nil {
+		return err
+	}
+
+	_, err = io.Copy(w, &buf)
+	return err
+}
+
+func addImagesToZip(zipWriter *zip.Writer) error {
+	for _, img := range images {
+		w, err := zipWriter.Create("word/media/" + img.Filename)
+		if err != nil {
+			return err
+		}
+		
+		if _, err = w.Write(img.Data); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ฟังก์ชันตรวจสอบว่าเป็น empty หรือมีแค่ &nbsp;
@@ -446,9 +883,6 @@ func createParagraphFromHTML(content, attributes string) Paragraph {
 		Runs: []Run{},
 	}
 
-	// Debug: แสดงการตรวจสอบ class="indent-a"
-
-	
 	// จัดการ class="indent-a"
 	if hasIndentAClass(attributes) {
 		if para.Props.Ind == nil {
@@ -580,10 +1014,6 @@ func parseContentToRuns(htmlContent string) []Run {
     return runs
 }
 
-
-
-
-
 // ฟังก์ชันประมวลผล &nbsp; และ HTML entities
 func processNbspAndEntities(text string) string {
 	// Debug: ดูว่ามี &nbsp; อยู่จริงไหม
@@ -600,8 +1030,6 @@ func processNbspAndEntities(text string) string {
 	
 	// แปลง marker กลับเป็น regular space (เริ่มต้นด้วย space ธรรมดาก่อน)
 	text = strings.ReplaceAll(text, "░", " ")
-	
-
 	
 	return text
 }
@@ -636,17 +1064,6 @@ func processLineBreaksInText(text string, props *RPr) []Run {
 	return runs
 }
 
-// ฟังก์ชันประมวลผล nested tags
-func processNestedTags(text string) string {
-	// จัดการ <strong> nested
-	text = regexp.MustCompile(`<(strong|b)[^>]*>(.*?)</(strong|b)>`).ReplaceAllString(text, "$2")
-	// จัดการ <i> nested  
-	text = regexp.MustCompile(`<(i|em)[^>]*>(.*?)</(i|em)>`).ReplaceAllString(text, "$2")
-	// ลบ tags อื่นๆ ที่เหลือ
-	text = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(text, "")
-	return text
-}
-
 func parseColorFromStyle(styles string) *RPr {
 	rPr := &RPr{}
 
@@ -668,6 +1085,10 @@ func createContentTypes(zipWriter *zip.Writer) error {
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
     <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
     <Default Extension="xml" ContentType="application/xml"/>
+    <Default Extension="png" ContentType="image/png"/>
+    <Default Extension="jpg" ContentType="image/jpeg"/>
+    <Default Extension="jpeg" ContentType="image/jpeg"/>
+    <Default Extension="gif" ContentType="image/gif"/>
     <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
     <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
     <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
